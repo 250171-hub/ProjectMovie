@@ -19,6 +19,10 @@ import javafx.animation.Timeline;
 import javafx.animation.KeyFrame;
 import java.util.Map;
 import java.util.HashMap;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import javafx.scene.control.Alert;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -49,6 +53,10 @@ public class MovieBookingApp extends Application {
     private ImageView heroImageView = new ImageView();
     private Label heroTitle = new Label();
 
+    // Default avatar placeholder image
+    private Image userAvatarImage = new Image("https://cdn-icons-png.flaticon.com/512/149/149071.png", 150, 150, true, true);
+    private ImageView navAvatarIcon = new ImageView(userAvatarImage);
+
     @Override
     public void start(Stage primaryStage) {
         // --- 1. NAVIGATION BAR ---
@@ -57,9 +65,21 @@ public class MovieBookingApp extends Application {
         navBar.setPadding(new Insets(15, 40, 15, 40));
         navBar.setStyle("-fx-background-color: " + BLACK + "; -fx-border-color: #333333; -fx-border-width: 0 0 1 0;");
 
+        navAvatarIcon.setFitWidth(40);
+        navAvatarIcon.setFitHeight(40);
+        navAvatarIcon.setClip(new javafx.scene.shape.Circle(20, 20, 20));
+
         Label logo = new Label("CINEMA RESERVE");
         logo.setFont(Font.font("Verdana", FontWeight.BOLD, 26));
         logo.setTextFill(Color.web(YELLOW));
+
+        Button profileBtn = new Button();
+        profileBtn.setGraphic(navAvatarIcon);
+        profileBtn.setStyle("-fx-background-color: transparent; -fx-cursor: hand; -fx-padding: 0;");
+        profileBtn.setOnAction(e -> {
+            // Call the new file and pass the stage and avatar icon!
+            UserProfile.display(primaryStage, navAvatarIcon);
+        });
 
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
@@ -84,7 +104,7 @@ public class MovieBookingApp extends Application {
         loginBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: " + YELLOW + "; -fx-border-color: " + YELLOW + "; -fx-border-radius: 5; -fx-font-weight: bold; -fx-padding: 5 15;");
         loginBtn.setOnAction(e -> goToTeammateLogin(primaryStage));
 
-        navBar.getChildren().addAll(logo, spacer, searchBox, cityFilter, loginBtn);
+        navBar.getChildren().addAll(logo, spacer, searchBox, cityFilter, profileBtn);
 
         // --- 2. HERO SLIDER (Large Featured Movie) ---
         StackPane heroSlider = new StackPane();
@@ -289,6 +309,10 @@ public class MovieBookingApp extends Application {
         header.setFont(Font.font("Verdana", FontWeight.BOLD, 22));
         content.getChildren().add(header);
 
+        // --- NEW: Tracking variables moved to the top of the method ---
+        final boolean[] proceedToCheckout = {false};
+        final double[] finalTotalToPay = {0.0};
+
         if (basket.isEmpty()) {
             Label empty = new Label("Your basket is empty.");
             empty.setTextFill(Color.GRAY);
@@ -296,35 +320,28 @@ public class MovieBookingApp extends Application {
 
             Button close = new Button("CLOSE");
             close.setMaxWidth(Double.MAX_VALUE);
-            // FIX 1: Use dialog.close() for a reliable exit
-            close.setOnAction(e -> dialog.close());
+            close.setOnAction(e -> {
+                dialog.setResult(null);
+                dialog.close();
+            });
             close.setStyle("-fx-background-color: " + YELLOW + "; -fx-font-weight: bold;");
             content.getChildren().add(close);
         } else {
             double tempTotal = 0;
 
-            // Loop through the basket
             for (int i = 0; i < basket.size(); i++) {
                 Movie m = basket.get(i);
                 HBox item = new HBox(10);
                 item.setAlignment(Pos.CENTER_LEFT);
 
-                // FIX 2: Add a Remove Button for individual movies
                 Button removeBtn = new Button("✖");
                 removeBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: #F44336; -fx-font-size: 14px; -fx-cursor: hand;");
                 removeBtn.setOnAction(e -> {
                     basket.remove(m);
-
-
-                    updateButtonVisuals(m);
-
-
-                    // 1. Remove the specific movie from the list
+                    updateButtonVisuals(m); // Fast UI update
                     dialog.setResult(null);
-                    dialog.close();// 2. Close the current dialog
-                    javafx.application.Platform.runLater(() -> {
-                        showBasket();
-                    });// 3. Re-open it to refresh the totals and list visually!
+                    dialog.close();
+                    javafx.application.Platform.runLater(() -> showBasket());
                 });
 
                 Label name = new Label("• " + m.getTitle());
@@ -334,7 +351,6 @@ public class MovieBookingApp extends Application {
                 Label p = new Label("$" + String.format("%.2f", m.getPrice()));
                 p.setTextFill(Color.LIGHTGRAY);
 
-                // Add the removeBtn to the row
                 item.getChildren().addAll(removeBtn, name, s, p);
                 content.getChildren().add(item);
 
@@ -342,12 +358,11 @@ public class MovieBookingApp extends Application {
             }
 
             final double initialTotal = tempTotal;
-            final double[] finalTotal = {initialTotal};
+            finalTotalToPay[0] = initialTotal; // Save to our tracking variable
 
             Separator sep = new Separator();
             sep.setStyle("-fx-background-color: #333333;");
 
-            // --- COUPON SYSTEM ---
             HBox couponBox = new HBox(10);
             couponBox.setAlignment(Pos.CENTER_LEFT);
 
@@ -363,7 +378,6 @@ public class MovieBookingApp extends Application {
 
             couponBox.getChildren().addAll(couponField, applyBtn, discountMsg);
 
-            // --- TOTAL LABELS ---
             VBox totalBox = new VBox(5);
             totalBox.setAlignment(Pos.CENTER_RIGHT);
             Label originalTotalLabel = new Label("Initial Price: $" + String.format("%.2f", initialTotal));
@@ -378,14 +392,14 @@ public class MovieBookingApp extends Application {
 
             applyBtn.setOnAction(e -> {
                 if (couponField.getText().equalsIgnoreCase("CINEMA20")) {
-                    double discount = initialTotal * 0.20; // 20% off
-                    finalTotal[0] = initialTotal - discount;
+                    double discount = initialTotal * 0.20;
+                    finalTotalToPay[0] = initialTotal - discount; // Update tracked total
 
-                    originalTotalLabel.setText("Initial Price: $" + String.format("%.2f", initialTotal) + " (Strikethrough)");
+                    originalTotalLabel.setText("Initial Price: $" + String.format("%.2f", initialTotal));
                     originalTotalLabel.setStyle("-fx-strikethrough: true; -fx-text-fill: gray;");
 
-                    finalTotalLabel.setText("SALE TOTAL: $" + String.format("%.2f", finalTotal[0]));
-                    finalTotalLabel.setTextFill(Color.web("#4CAF50")); // Green for success
+                    finalTotalLabel.setText("SALE TOTAL: $" + String.format("%.2f", finalTotalToPay[0]));
+                    finalTotalLabel.setTextFill(Color.web("#4CAF50"));
 
                     discountMsg.setText("-20% Applied!");
                     discountMsg.setTextFill(Color.web("#4CAF50"));
@@ -393,31 +407,29 @@ public class MovieBookingApp extends Application {
                     couponField.setDisable(true);
                 } else {
                     discountMsg.setText("Invalid Code");
-                    discountMsg.setTextFill(Color.web("#F44336")); // Red for error
+                    discountMsg.setTextFill(Color.web("#F44336"));
                 }
             });
 
             content.getChildren().addAll(sep, couponBox, totalBox);
 
-            // --- CHECKOUT BUTTONS ---
             HBox buttonBox = new HBox(15);
             buttonBox.setAlignment(Pos.CENTER_RIGHT);
             buttonBox.setPadding(new Insets(10, 0, 0, 0));
 
             Button close = new Button("CANCEL");
             close.setStyle("-fx-background-color: transparent; -fx-text-fill: " + YELLOW + "; -fx-border-color: " + YELLOW + "; -fx-border-radius: 5;");
-            // FIX 1: Use dialog.close() for a reliable exit
-            close.setOnAction(e -> dialog.close());
+            close.setOnAction(e -> {
+                dialog.setResult(null);
+                dialog.close();
+            });
 
             Button checkout = new Button("PROCEED TO CHECKOUT");
             checkout.setStyle("-fx-background-color: " + YELLOW + "; -fx-font-weight: bold; -fx-text-fill: black; -fx-background-radius: 5;");
             checkout.setOnAction(e -> {
+                proceedToCheckout[0] = true; // Set flag to true!
                 dialog.setResult(null);
-                dialog.close();
-                showPaymentOptions(finalTotal[0]);
-                javafx.application.Platform.runLater(() -> {
-                    showPaymentOptions(finalTotal[0]);
-                });
+                dialog.close(); // Close basket safely
             });
 
             buttonBox.getChildren().addAll(close, checkout);
@@ -429,7 +441,14 @@ public class MovieBookingApp extends Application {
 
         dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
         dialog.getDialogPane().lookupButton(ButtonType.CLOSE).setVisible(false);
+
+        // App pauses here while the user looks at the basket
         dialog.showAndWait();
+
+        // --- NEW: Safe trigger for payment screen ---
+        if (proceedToCheckout[0]) {
+            showPaymentOptions(finalTotalToPay[0]);
+        }
     }
 
     // --- UPDATED METHOD: Redesigned Payment Options Dialog ---
@@ -450,7 +469,6 @@ public class MovieBookingApp extends Application {
         amountLabel.setTextFill(Color.web(YELLOW));
         amountLabel.setFont(Font.font("Verdana", FontWeight.BOLD, 24));
 
-        // Credit Card Button Design
         Button cardBtn = new Button("💳   PAY WITH CREDIT CARD");
         cardBtn.setPrefWidth(280);
         cardBtn.setPrefHeight(50);
@@ -460,10 +478,9 @@ public class MovieBookingApp extends Application {
         cardBtn.setOnAction(e -> {
             payDialog.setResult(null);
             payDialog.close();
-            generateBookingId("Credit Card", amountToPay);
+            javafx.application.Platform.runLater(() -> showNotificationOptions("Credit Card", amountToPay));
         });
 
-        // Cash Button Design
         Button cashBtn = new Button("💵   PAY AT CINEMA (CASH)");
         cashBtn.setPrefWidth(280);
         cashBtn.setPrefHeight(50);
@@ -472,7 +489,8 @@ public class MovieBookingApp extends Application {
         cashBtn.setOnMouseExited(e -> cashBtn.setStyle("-fx-background-color: #2A2A2A; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: #555555; -fx-border-radius: 5; -fx-background-radius: 5; -fx-cursor: hand;"));
         cashBtn.setOnAction(e -> {
             payDialog.setResult(null);
-            generateBookingId("Cash", amountToPay);
+            payDialog.close();
+            javafx.application.Platform.runLater(() -> showNotificationOptions("Cash", amountToPay));
         });
 
         Button cancelBtn = new Button("← Back to Basket");
@@ -481,14 +499,14 @@ public class MovieBookingApp extends Application {
         cancelBtn.setOnMouseExited(e -> cancelBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: #888888; -fx-cursor: hand;"));
         cancelBtn.setOnAction(e -> {
             payDialog.setResult(null);
-            showBasket(); // Re-open basket if they cancel
+            payDialog.close();
+            javafx.application.Platform.runLater(() -> showBasket());
         });
 
         content.getChildren().addAll(header, amountLabel, cardBtn, cashBtn, cancelBtn);
 
         payDialog.getDialogPane().setContent(content);
-        payDialog.getDialogPane().setStyle("-fx-background-color: transparent;");
-        payDialog.initStyle(javafx.stage.StageStyle.TRANSPARENT); // Removes default OS window borders for a cleaner look
+        // Note: StageStyle.TRANSPARENT was completely removed here so the window shows up normally
 
         payDialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
         payDialog.getDialogPane().lookupButton(ButtonType.CLOSE).setVisible(false);
@@ -496,33 +514,106 @@ public class MovieBookingApp extends Application {
         payDialog.showAndWait();
     }
 
+    private void showNotificationOptions(String paymentMethod, double amountToPay) {
+        Dialog<Void> notifDialog = new Dialog<>();
+        notifDialog.setTitle("Notification Preference");
+
+        VBox content = new VBox(20);
+        content.setPadding(new Insets(35));
+        content.setStyle("-fx-background-color: " + DARK_GRAY + "; -fx-border-color: " + YELLOW + "; -fx-border-width: 2;");
+        content.setAlignment(Pos.CENTER);
+
+        Label header = new Label("HOW SHOULD WE SEND YOUR RECEIPT?");
+        header.setTextFill(Color.WHITE);
+        header.setFont(Font.font("Verdana", FontWeight.BOLD, 16));
+
+        Button emailBtn = new Button("📧   SEND VIA EMAIL");
+        emailBtn.setPrefWidth(280);
+        emailBtn.setPrefHeight(50);
+        emailBtn.setStyle("-fx-background-color: #2A2A2A; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: #555555; -fx-border-radius: 5; -fx-background-radius: 5; -fx-cursor: hand;");
+        emailBtn.setOnMouseEntered(e -> emailBtn.setStyle("-fx-background-color: #3A3A3A; -fx-text-fill: " + YELLOW + "; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: " + YELLOW + "; -fx-border-radius: 5; -fx-background-radius: 5; -fx-cursor: hand;"));
+        emailBtn.setOnMouseExited(e -> emailBtn.setStyle("-fx-background-color: #2A2A2A; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: #555555; -fx-border-radius: 5; -fx-background-radius: 5; -fx-cursor: hand;"));
+        emailBtn.setOnAction(e -> {
+            notifDialog.setResult(null);
+            notifDialog.close();
+            javafx.application.Platform.runLater(() -> generateBookingId(paymentMethod, amountToPay, "Email"));
+        });
+
+        Button smsBtn = new Button("📱   SEND VIA SMS");
+        smsBtn.setPrefWidth(280);
+        smsBtn.setPrefHeight(50);
+        smsBtn.setStyle("-fx-background-color: #2A2A2A; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: #555555; -fx-border-radius: 5; -fx-background-radius: 5; -fx-cursor: hand;");
+        smsBtn.setOnMouseEntered(e -> smsBtn.setStyle("-fx-background-color: #3A3A3A; -fx-text-fill: " + YELLOW + "; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: " + YELLOW + "; -fx-border-radius: 5; -fx-background-radius: 5; -fx-cursor: hand;"));
+        smsBtn.setOnMouseExited(e -> smsBtn.setStyle("-fx-background-color: #2A2A2A; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: #555555; -fx-border-radius: 5; -fx-background-radius: 5; -fx-cursor: hand;"));
+        smsBtn.setOnAction(e -> {
+            notifDialog.setResult(null);
+            notifDialog.close();
+            javafx.application.Platform.runLater(() -> generateBookingId(paymentMethod, amountToPay, "SMS"));
+        });
+
+        content.getChildren().addAll(header, emailBtn, smsBtn);
+
+        notifDialog.getDialogPane().setContent(content);
+        notifDialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        notifDialog.getDialogPane().lookupButton(ButtonType.CLOSE).setVisible(false);
+
+        notifDialog.showAndWait();
+    }
+
+
     // --- UPDATED METHOD: Booking Confirmation takes the final price ---
-    private void generateBookingId(String paymentMethod, double finalTotal) {
-        String bookingId = "BKG-" + (int)(Math.random() * 900000 + 100000);
+    private void generateBookingId(String paymentMethod, double amountToPay, String notificationPref) {
+        // 1. Generate a random Booking ID
+        String bookingId = "BKG-" + (int)(Math.random() * 1000000);
 
-        Alert alert = new Alert(Alert.AlertType.INFORMATION);
-        alert.setTitle("Booking Confirmation");
-        alert.setHeaderText("Transaction Successful!");
+        // 2. Open Database Connection and Save!
+        try (Connection conn = DatabaseManager.getConnection()) {
 
-        String confirmationMessage = String.format(
-                "Payment Method: %s\n" +
-                        "Tickets Booked: %d\n" +
-                        "Total Paid: $%.2f\n\n" +
-                        "Your Booking ID is: %s\n\n" +
-                        "Please present this ID at the cinema counter.",
-                paymentMethod, basket.size(), finalTotal, bookingId
-        );
+            // --- A. SAVE THE MAIN BOOKING ---
+            String insertBooking = "INSERT INTO bookings (booking_id, payment_method, total_paid, notification_pref) VALUES (?, ?, ?, ?)";
+            PreparedStatement bookingStmt = conn.prepareStatement(insertBooking);
+            bookingStmt.setString(1, bookingId);
+            bookingStmt.setString(2, paymentMethod);
+            bookingStmt.setDouble(3, amountToPay);
+            bookingStmt.setString(4, notificationPref);
+            bookingStmt.executeUpdate();
 
-        alert.setContentText(confirmationMessage);
+            // --- B. SAVE EVERY MOVIE FROM THE BASKET ---
+            String insertTicket = "INSERT INTO booked_tickets (booking_id, movie_title, price) VALUES (?, ?, ?)";
+            PreparedStatement ticketStmt = conn.prepareStatement(insertTicket);
 
-        DialogPane dialogPane = alert.getDialogPane();
-        dialogPane.setStyle("-fx-background-color: " + DARK_GRAY + "; -fx-border-color: #4CAF50; -fx-border-width: 2;");
-        dialogPane.lookupAll(".label").forEach(node -> ((Label)node).setTextFill(Color.WHITE));
+            for (Movie m : basket) {
+                ticketStmt.setString(1, bookingId);
+                ticketStmt.setString(2, m.getTitle());
+                ticketStmt.setDouble(3, m.getPrice());
+                ticketStmt.executeUpdate(); // Saves this specific movie ticket
+            }
 
-        alert.showAndWait();
-        basket.clear();
-        // Empty basket after successful checkout
-        loadMovies(currentSearch, currentCity);
+            // 3. Push the Notification to the UserProfile!
+            String notifText = "Booking " + bookingId + " confirmed! Paid $" + String.format("%.2f", amountToPay) +
+                    " via " + paymentMethod + ". Receipt sent via " + notificationPref + ".";
+            UserProfile.userNotifications.add(0, new UserProfile.Notification("New Booking", notifText));
+
+            // 4. Clear basket and update the Main Window UI
+            basket.clear();
+            loadMovies(currentSearch, currentCity);
+
+            // 5. Show Success Popup
+            Alert alert = new Alert(Alert.AlertType.INFORMATION);
+            alert.setTitle("Payment Successful");
+            alert.setHeaderText("Checkout Complete!");
+            alert.setContentText("Your Booking ID is: " + bookingId + "\nAll tickets have been saved to the database.");
+            alert.showAndWait();
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+            // Show an error if the database isn't running or password is wrong
+            Alert error = new Alert(Alert.AlertType.ERROR);
+            error.setTitle("Database Error");
+            error.setHeaderText("Could not save booking!");
+            error.setContentText("Please check your database connection.\nError: " + e.getMessage());
+            error.showAndWait();
+        }
     }
 
     private void goToTeammateLogin(Stage stage) {
