@@ -1,56 +1,67 @@
 package org.example._version;
+
 import jakarta.mail.*;
 import jakarta.mail.internet.InternetAddress;
 import jakarta.mail.internet.MimeMessage;
 import java.util.Properties;
 
+// ==========================================
+// NOTIFICATION SYSTEM
+// ==========================================
 
-interface NotificationService {
-    void sendNotification(String message);
+public interface NotificationService {
+    void sendNotification(String messageContent);
 }
 
 class EmailNotification implements NotificationService {
-    private final String senderEmail = "your-email@gmail.com";
-    private final String appPassword = "xxxx xxxx xxxx xxxx"; // Use an App Password, not your real one
-    private String recipientEmail;
 
+    // Ideally, these should be loaded from a configuration file or environment variables
+    private static final String SENDER_EMAIL = "your-email@gmail.com";
+    private static final String APP_PASSWORD = "xxxx xxxx xxxx xxxx";
+    private static final String SMTP_HOST = "smtp.gmail.com";
+    private static final String SMTP_PORT = "587";
+
+    private final String recipientEmail;
+
+    /**
+     * @param recipientEmail The email address where the notification will be sent.
+     */
     public EmailNotification(String recipientEmail) {
         this.recipientEmail = recipientEmail;
-    }
-
-    public EmailNotification() {
-
     }
 
     @Override
     public void sendNotification(String messageContent) {
         // 1. Setup SMTP Server Properties
-        Properties props = new Properties();
-        props.put("mail.smtp.auth", "true");
-        props.put("mail.smtp.starttls.enable", "true");
-        props.put("mail.smtp.host", "smtp.gmail.com");
-        props.put("mail.smtp.port", "587");
+        Properties smtpProperties = new Properties();
+        smtpProperties.put("mail.smtp.auth", "true");
+        smtpProperties.put("mail.smtp.starttls.enable", "true");
+        smtpProperties.put("mail.smtp.host", SMTP_HOST);
+        smtpProperties.put("mail.smtp.port", SMTP_PORT);
 
         // 2. Create Session with Authentication
-        Session session = Session.getInstance(props, new Authenticator() {
+        Session session = Session.getInstance(smtpProperties, new Authenticator() {
+            @Override
             protected PasswordAuthentication getPasswordAuthentication() {
-                return new PasswordAuthentication(senderEmail, appPassword);
+                return new PasswordAuthentication(SENDER_EMAIL, APP_PASSWORD);
             }
         });
 
-        // 3. Construct and Send the Email in a new Thread
-        // (Important: prevents JavaFX UI from freezing)
+        // 3. Construct and Send the Email in a separate Thread
+        // Running on a background thread ensures the JavaFX UI doesn't freeze
         new Thread(() -> {
             try {
-                Message message = new MimeMessage(session);
-                message.setFrom(new InternetAddress(senderEmail));
-                message.setRecipients(Message.RecipientType.TO, InternetAddress.parse(recipientEmail));
-                message.setSubject("Movie Booking Confirmation");
-                message.setText(messageContent);
+                Message emailMessage = new MimeMessage(session);
+                emailMessage.setFrom(new InternetAddress(SENDER_EMAIL));
+                emailMessage.setRecipients(Message.RecipientType.TO, InternetAddress.parse(recipientEmail));
+                emailMessage.setSubject("Cinema Reserve | Booking Confirmation");
+                emailMessage.setText(messageContent);
 
-                Transport.send(message);
+                Transport.send(emailMessage);
                 System.out.println("✅ Email sent successfully to " + recipientEmail);
+
             } catch (MessagingException e) {
+                System.err.println("❌ Failed to send email to " + recipientEmail);
                 e.printStackTrace();
             }
         }).start();
@@ -58,32 +69,51 @@ class EmailNotification implements NotificationService {
 }
 
 class SmsNotification implements NotificationService {
+
+    private final String phoneNumber;
+
+    public SmsNotification(String phoneNumber) {
+        this.phoneNumber = phoneNumber;
+    }
+
     @Override
-    public void sendNotification(String message) {
-        System.out.println("📱 Sending SMS: " + message);
+    public void sendNotification(String messageContent) {
+        // Implementation for an SMS Gateway (e.g., Twilio) would go here
+        System.out.println("📱 Sending SMS to " + phoneNumber + ": " + messageContent);
     }
 }
 
-// --- Payment System ---
+// ==========================================
+// PAYMENT SYSTEM
+// ==========================================
+
 interface PaymentMethod {
     boolean processPayment(double amount);
 }
 
 class CardPayment implements PaymentMethod {
-    private String cardNumber;
-    public CardPayment() { this.cardNumber = cardNumber; }
+    private final String cardNumber;
+
+    // BUG FIX: Added the parameter to the constructor
+    public CardPayment(String cardNumber) {
+        this.cardNumber = cardNumber;
+    }
 
     @Override
     public boolean processPayment(double amount) {
-        System.out.println("💳 Processing card payment of $" + amount + " on card " + cardNumber);
-        return true; // Assume success for prototype
+        // Mask the card number for security in logs (e.g., **** **** **** 1234)
+        String maskedCard = "**** **** **** " + cardNumber.substring(Math.max(0, cardNumber.length() - 4));
+        System.out.println("💳 Processing card payment of $" + String.format("%.2f", amount) + " on card " + maskedCard);
+
+        // Assume success for prototype, but real logic would connect to Stripe/PayPal here
+        return true;
     }
 }
 
 class CashPayment implements PaymentMethod {
     @Override
     public boolean processPayment(double amount) {
-        System.out.println("💵 Awaiting cash payment of $" + amount + " at the counter.");
+        System.out.println("💵 Awaiting cash payment of $" + String.format("%.2f", amount) + " at the counter.");
         return true;
     }
 }
