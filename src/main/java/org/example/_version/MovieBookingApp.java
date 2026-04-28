@@ -1,8 +1,10 @@
 package org.example._version;
 
 import javafx.animation.FadeTransition;
+import javafx.animation.PauseTransition;
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.concurrent.Task;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
@@ -19,87 +21,95 @@ import javafx.util.Duration;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MovieBookingApp extends Application {
-
 
     // --- STATE MANAGEMENT ---
     private final MovieCatalog catalog = new MovieCatalog();
     private final List<Movie> basket = new ArrayList<>();
     private final Map<Movie, Button> cardButtons = new HashMap<>();
 
+    // --- IMAGE CACHE: Prevents re-downloading the same image repeatedly ---
+    private final Map<String, Image> imageCache = new ConcurrentHashMap<>();
+
+    // --- THREAD POOL: Dedicated threads for background image loading ---
+    private final ExecutorService imageLoader = Executors.newFixedThreadPool(4);
+
+    // --- FILTER STATE ---
     private String currentSearchKeyword = "";
-    private String currentCityFilter = "All Cities";
+    private String currentCityFilter    = "All Cities";
+    private String currentGenreFilter   = "All Genres";
+    private String currentYearFilter    = "All Years";
+    private String currentLanguageFilter = "All Languages";
+
+    // --- HERO SLIDER STATE ---
     private int currentHeroImageIndex = 0;
     private List<Movie> recommendedMovies;
 
     // --- UI COMPONENTS ---
-    private final FlowPane movieGrid = new FlowPane();
+    private final FlowPane movieGrid   = new FlowPane();
     private final ImageView heroImageView = new ImageView();
-    private final Label heroTitle = new Label();
-    private final Image userAvatarImage = new Image("https://cdn-icons-png.flaticon.com/512/149/149071.png", 150, 150, true, true);
+    private final Label heroTitle      = new Label();
+    private final Image userAvatarImage = new Image(
+            "https://cdn-icons-png.flaticon.com/512/149/149071.png", 150, 150, true, true);
     private final ImageView navAvatarIcon = new ImageView(userAvatarImage);
 
     // --- THEME CONSTANTS ---
-    private static final String COLOR_BLACK = "#121212";
-    private static final String COLOR_YELLOW = "#FFD700";
-    private static final String COLOR_DARK_GRAY = "#1E1E1E";
+    private static final String COLOR_BLACK        = "#121212";
+    private static final String COLOR_YELLOW       = "#FFD700";
+    private static final String COLOR_DARK_GRAY    = "#1E1E1E";
     private static final String COLOR_SUCCESS_GREEN = "#4CAF50";
-    private static final String COLOR_ERROR_RED = "#F44336";
+    private static final String COLOR_ERROR_RED    = "#F44336";
+
+    // Placeholder shown while a poster is still downloading
+    private static final String PLACEHOLDER_URL =
+            "https://via.placeholder.com/220x310/1E1E1E/FFD700?text=Loading...";
+
+    // =========================================================================
+    // APPLICATION ENTRY POINT
+    // =========================================================================
 
     @Override
     public void start(Stage primaryStage) {
-
-
-        // Simulates a logged-in user so the session knows who is saving the profile
         UserSession.getInstance().loginUser(1, "JohnDoe", 100.0, "", "", "", "");
 
-
-
-
-        // 1. Setup Navigation Bar
-        HBox navBar = createNavigationBar(primaryStage);
-
-        // 2. Setup Hero Slider
+        HBox     navBar     = createNavigationBar(primaryStage);
         StackPane heroSlider = createHeroSlider();
-
-        // 3. Setup Main Movie Grid
         ScrollPane mainScroll = createMainMovieGrid();
+        Button   basketBtn  = createBasketButton();
 
-        // 4. Setup Floating Basket Button
-        Button basketBtn = createBasketButton();
-
-        // 5. Assemble Layout
         StackPane rootStack = new StackPane();
         VBox mainLayout = new VBox(navBar, heroSlider, mainScroll);
         rootStack.getChildren().addAll(mainLayout, basketBtn);
         StackPane.setAlignment(basketBtn, Pos.BOTTOM_RIGHT);
         StackPane.setMargin(basketBtn, new Insets(40));
 
-        // 6. Load Initial Data
-        initializeData();
+        // FIX: Load all data in background so the window opens instantly
+        initializeDataAsync();
 
-        // 7. Render Scene
         Scene scene = new Scene(rootStack, 1300, 900);
         primaryStage.setTitle("Cinema Reserve | Premium Online Booking");
         primaryStage.setScene(scene);
         primaryStage.show();
+
+        // Shut down thread pool when window closes
+        primaryStage.setOnCloseRequest(e -> imageLoader.shutdownNow());
     }
 
-    // ==========================================
-    // UI BUILDER METHODS (Applying Single Responsibility)
-    // ==========================================
+    // =========================================================================
+    // UI BUILDER METHODS
+    // =========================================================================
 
     private HBox createNavigationBar(Stage primaryStage) {
         HBox navBar = new HBox(20);
         navBar.setAlignment(Pos.CENTER_LEFT);
         navBar.setPadding(new Insets(15, 40, 15, 40));
-        navBar.setStyle("-fx-background-color: " + COLOR_BLACK + "; -fx-border-color: #333333; -fx-border-width: 0 0 1 0;");
+        navBar.setStyle("-fx-background-color: " + COLOR_BLACK +
+                "; -fx-border-color: #333333; -fx-border-width: 0 0 1 0;");
 
         navAvatarIcon.setFitWidth(40);
         navAvatarIcon.setFitHeight(40);
@@ -112,56 +122,141 @@ public class MovieBookingApp extends Application {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
+        // --- Search Box ---
         TextField searchBox = new TextField();
         searchBox.setPromptText("Search movies...");
         searchBox.setPrefWidth(200);
-        searchBox.setStyle("-fx-background-color: #252525; -fx-text-fill: white; -fx-prompt-text-fill: #888888;");
+        searchBox.setStyle("-fx-background-color: #252525; -fx-text-fill: white;" +
+                " -fx-prompt-text-fill: #888888;");
 
+        // --- City Filter ---
         ComboBox<String> cityFilter = new ComboBox<>();
         cityFilter.getItems().setAll("All Cities", "Tashkent", "London", "New York");
         cityFilter.setValue("All Cities");
         cityFilter.setStyle("-fx-background-color: " + COLOR_YELLOW + "; -fx-font-weight: bold;");
 
-        // Add event listeners for filtering
-        searchBox.textProperty().addListener((observable, oldValue, newValue) -> loadMovies(newValue, cityFilter.getValue()));
-        cityFilter.setOnAction(e -> loadMovies(searchBox.getText(), cityFilter.getValue()));
+        // --- FIX: Single shared debounce timer for ALL filter changes ---
+        PauseTransition searchPause = new PauseTransition(Duration.millis(400));
+        searchPause.setOnFinished(e -> loadMoviesAsync(
+                searchBox.getText(),
+                cityFilter.getValue(),
+                currentGenreFilter,
+                currentYearFilter,
+                currentLanguageFilter
+        ));
 
-// Create the buttons
+        Runnable restartTimer = searchPause::playFromStart;
+        searchBox.textProperty().addListener((obs, o, n) -> restartTimer.run());
+        cityFilter.setOnAction(e -> restartTimer.run());
+
+        // --- Profile / Login Buttons ---
         Button profileBtn = new Button();
         profileBtn.setGraphic(navAvatarIcon);
         profileBtn.setStyle("-fx-background-color: transparent; -fx-cursor: hand; -fx-padding: 0;");
         profileBtn.setOnAction(e -> UserProfile.display(primaryStage, navAvatarIcon));
 
         Button loginBtn = new Button("LOG IN");
-        loginBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: " + COLOR_YELLOW + "; -fx-border-color: " + COLOR_YELLOW + "; -fx-border-radius: 5; -fx-font-weight: bold; -fx-padding: 5 15;");
+        loginBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: " + COLOR_YELLOW +
+                "; -fx-border-color: " + COLOR_YELLOW +
+                "; -fx-border-radius: 5; -fx-font-weight: bold; -fx-padding: 5 15;");
         loginBtn.setOnAction(e -> goToTeammateLogin(primaryStage));
 
-        // 👉 THE NEW LOGIC: Check if user is logged in (Assuming ID > 0 means logged in)
         boolean isLoggedIn = UserSession.getInstance().getUserId() > 0;
-
         loginBtn.setVisible(!isLoggedIn);
-        loginBtn.setManaged(!isLoggedIn); // setManaged(false) means it won't take up blank space
-
+        loginBtn.setManaged(!isLoggedIn);
         profileBtn.setVisible(isLoggedIn);
         profileBtn.setManaged(isLoggedIn);
 
-        // Inside your Main or Home Screen file:
-
-        int currentUserId = UserSession.getInstance().getUserId();
-
-        if (currentUserId > 0) {
-            // User IS logged in: Show the Avatar picture
-            navBar.getChildren().add(navAvatarIcon);
-        } else {
-            // User IS NOT logged in: Show the Sign In button
-            Button signInBtn = new Button("SIGN IN");
-          // Sign in Button logic to sign in
-            navBar.getChildren().add(signInBtn);
-        }
-
-        // Add them to the nav bar as usual
         navBar.getChildren().addAll(logo, spacer, searchBox, cityFilter, loginBtn, profileBtn);
+
+        // ---- NEW FILTER BAR (Genre / Year / Language) ----
+        // We build it below and attach it in createMainMovieGrid via a VBox wrapper.
+        // We store the debounce-trigger reference so filter combos can reuse it.
+        this.filterDebounce = searchPause;
+        this.searchBoxRef   = searchBox;
+        this.cityFilterRef  = cityFilter;
+
         return navBar;
+    }
+
+    // References stored so the filter bar (built separately) can share the same debounce timer
+    private PauseTransition filterDebounce;
+    private TextField        searchBoxRef;
+    private ComboBox<String> cityFilterRef;
+
+    /** Builds the secondary filter row: Genre | Year | Language */
+    private HBox createFilterBar() {
+        HBox bar = new HBox(15);
+        bar.setAlignment(Pos.CENTER_LEFT);
+        bar.setPadding(new Insets(10, 40, 10, 40));
+        bar.setStyle("-fx-background-color: #1A1A1A; -fx-border-color: #2A2A2A;" +
+                " -fx-border-width: 0 0 1 0;");
+
+        Label filterLabel = new Label("FILTER:");
+        filterLabel.setTextFill(Color.web(COLOR_YELLOW));
+        filterLabel.setFont(Font.font("Verdana", FontWeight.BOLD, 12));
+
+        // --- Genre ---
+        ComboBox<String> genreBox = new ComboBox<>();
+        genreBox.getItems().setAll(
+                "All Genres","Action","Comedy","Drama","Horror",
+                "Sci-Fi","Romance","Thriller","Animation","Documentary"
+        );
+        genreBox.setValue("All Genres");
+        styleFilterCombo(genreBox);
+        genreBox.setOnAction(e -> {
+            currentGenreFilter = genreBox.getValue();
+            filterDebounce.playFromStart();
+        });
+
+        // --- Release Year ---
+        ComboBox<String> yearBox = new ComboBox<>();
+        List<String> years = new ArrayList<>();
+        years.add("All Years");
+        for (int y = 2025; y >= 2000; y--) years.add(String.valueOf(y));
+        yearBox.getItems().setAll(years);
+        yearBox.setValue("All Years");
+        styleFilterCombo(yearBox);
+        yearBox.setOnAction(e -> {
+            currentYearFilter = yearBox.getValue();
+            filterDebounce.playFromStart();
+        });
+
+        // --- Language ---
+        ComboBox<String> langBox = new ComboBox<>();
+        langBox.getItems().setAll(
+                "All Languages","English","Uzbek","Russian","Spanish","French","Korean","Japanese"
+        );
+        langBox.setValue("All Languages");
+        styleFilterCombo(langBox);
+        langBox.setOnAction(e -> {
+            currentLanguageFilter = langBox.getValue();
+            filterDebounce.playFromStart();
+        });
+
+        // --- Reset Button ---
+        Button resetBtn = new Button("✕ RESET");
+        resetBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: #888888;" +
+                " -fx-border-color: #555555; -fx-border-radius: 4; -fx-font-size: 11px;" +
+                " -fx-cursor: hand; -fx-padding: 4 10;");
+        resetBtn.setOnAction(e -> {
+            genreBox.setValue("All Genres");
+            yearBox.setValue("All Years");
+            langBox.setValue("All Languages");
+            currentGenreFilter    = "All Genres";
+            currentYearFilter     = "All Years";
+            currentLanguageFilter = "All Languages";
+            filterDebounce.playFromStart();
+        });
+
+        bar.getChildren().addAll(filterLabel, genreBox, yearBox, langBox, resetBtn);
+        return bar;
+    }
+
+    private void styleFilterCombo(ComboBox<String> box) {
+        box.setStyle("-fx-background-color: #252525; -fx-text-fill: white;" +
+                " -fx-border-color: #444444; -fx-border-radius: 4;");
+        box.setPrefWidth(150);
     }
 
     private StackPane createHeroSlider() {
@@ -175,14 +270,16 @@ public class MovieBookingApp extends Application {
         VBox overlay = new VBox(10);
         overlay.setAlignment(Pos.BOTTOM_LEFT);
         overlay.setPadding(new Insets(0, 0, 40, 60));
-        overlay.setStyle("-fx-background-color: linear-gradient(to top, rgba(18,18,18,1), rgba(18,18,18,0));");
+        overlay.setStyle("-fx-background-color: linear-gradient(to top," +
+                " rgba(18,18,18,1), rgba(18,18,18,0));");
 
         heroTitle.setFont(Font.font("Verdana", FontWeight.BOLD, 48));
         heroTitle.setTextFill(Color.WHITE);
 
         Button nextBtn = new Button("NEXT FEATURED ❯");
-        nextBtn.setStyle("-fx-background-color: " + COLOR_YELLOW + "; -fx-font-weight: bold; -fx-padding: 10 20;");
-        nextBtn.setOnAction(e -> rotateHeroImage());
+        nextBtn.setStyle("-fx-background-color: " + COLOR_YELLOW +
+                "; -fx-font-weight: bold; -fx-padding: 10 20;");
+        nextBtn.setOnAction(e -> rotateHeroImageAsync());
 
         overlay.getChildren().addAll(heroTitle, nextBtn);
         heroSlider.getChildren().addAll(heroImageView, overlay);
@@ -195,84 +292,180 @@ public class MovieBookingApp extends Application {
         movieGrid.setPadding(new Insets(40));
         movieGrid.setStyle("-fx-background-color: " + COLOR_BLACK + ";");
 
-        ScrollPane mainScroll = new ScrollPane(movieGrid);
+        // FIX: Wrap grid + filter bar in a single VBox so everything scrolls together
+        HBox filterBar  = createFilterBar();
+        VBox gridWrapper = new VBox(filterBar, movieGrid);
+        gridWrapper.setStyle("-fx-background-color: " + COLOR_BLACK + ";");
+
+        ScrollPane mainScroll = new ScrollPane(gridWrapper);
         mainScroll.setFitToWidth(true);
-        mainScroll.setStyle("-fx-background: " + COLOR_BLACK + "; -fx-background-color: " + COLOR_BLACK + "; -fx-border-color: " + COLOR_BLACK + ";");
+        mainScroll.setStyle("-fx-background: " + COLOR_BLACK +
+                "; -fx-background-color: " + COLOR_BLACK +
+                "; -fx-border-color: " + COLOR_BLACK + ";");
         VBox.setVgrow(mainScroll, Priority.ALWAYS);
 
-        // Bind grid width to scroll pane so items wrap responsively
         movieGrid.prefWrapLengthProperty().bind(mainScroll.widthProperty().subtract(80));
         return mainScroll;
     }
 
     private Button createBasketButton() {
         Button basketBtn = new Button("🛒");
-        basketBtn.setStyle("-fx-background-color: " + COLOR_YELLOW + "; -fx-background-radius: 50; -fx-font-size: 28; -fx-pref-width: 75; -fx-pref-height: 75; -fx-effect: dropshadow(three-pass-box, rgba(0,0,0,0.8), 15, 0, 0, 0);");
+        basketBtn.setStyle("-fx-background-color: " + COLOR_YELLOW +
+                "; -fx-background-radius: 50; -fx-font-size: 28;" +
+                " -fx-pref-width: 75; -fx-pref-height: 75;" +
+                " -fx-effect: dropshadow(three-pass-box, rgba(0,0,0,0.8), 15, 0, 0, 0);");
         basketBtn.setOnAction(e -> showBasket());
         return basketBtn;
     }
 
-    // ==========================================
-    // LOGIC & STATE METHODS
-    // ==========================================
+    // =========================================================================
+    // ASYNC DATA LOADING  (fixes lag + slow startup)
+    // =========================================================================
 
-    private void initializeData() {
-        recommendedMovies = catalog.searchAndFilter("", Genre.ALL, "All Cities", 0.0);
-        Collections.shuffle(recommendedMovies);
-        rotateHeroImage();
-        loadMovies(currentSearchKeyword, currentCityFilter);
+    /**
+     * FIX: Runs the initial data load on a background thread.
+     * The window opens immediately; data appears once ready.
+     */
+    private void initializeDataAsync() {
+        Task<List<Movie>> task = new Task<>() {
+            @Override
+            protected List<Movie> call() {
+                List<Movie> movies = catalog.searchAndFilter("", Genre.ALL, "All Cities", 0.0);
+                Collections.shuffle(movies);
+                return movies;
+            }
+        };
+
+        task.setOnSucceeded(e -> {
+            recommendedMovies = task.getValue();
+            rotateHeroImageAsync();
+            loadMoviesAsync(currentSearchKeyword, currentCityFilter,
+                    currentGenreFilter, currentYearFilter, currentLanguageFilter);
+        });
+
+        task.setOnFailed(e -> task.getException().printStackTrace());
+        new Thread(task, "init-data-thread").start();
     }
 
-    private void rotateHeroImage() {
+    /**
+     * FIX: Runs catalog filtering on a background thread, then updates
+     * the UI on the JavaFX Application Thread — no more UI freezing.
+     */
+    private void loadMoviesAsync(String keyword, String city,
+                                 String genre, String year, String language) {
+        this.currentSearchKeyword    = keyword;
+        this.currentCityFilter       = city;
+        this.currentGenreFilter      = genre;
+        this.currentYearFilter       = year;
+        this.currentLanguageFilter   = language;
+
+        // Show a loading indicator immediately (on FX thread)
+        movieGrid.getChildren().clear();
+        ProgressIndicator spinner = new ProgressIndicator();
+        spinner.setStyle("-fx-progress-color: " + COLOR_YELLOW + ";");
+        movieGrid.getChildren().add(spinner);
+
+        Task<List<Movie>> task = new Task<>() {
+            @Override
+            protected List<Movie> call() {
+                // Convert filter strings to what your catalog expects
+                Genre genreEnum = parseGenre(genre);
+                int   yearInt   = "All Years".equals(year) ? 0 : Integer.parseInt(year);
+
+                // Your catalog.searchAndFilter signature — extend it if needed
+                List<Movie> results = catalog.searchAndFilter(keyword, genreEnum, city, 0.0);
+
+                // Client-side year + language filter (add DB columns later if preferred)
+                results.removeIf(m -> {
+                    boolean failsYear = yearInt > 0 && m.getReleaseYear() != yearInt;
+                    boolean failsLang = !"All Languages".equals(language)
+                            && !language.equalsIgnoreCase(m.getLanguage());
+                    return failsYear || failsLang;
+                });
+
+                return results;
+            }
+        };
+
+        task.setOnSucceeded(e -> {
+            movieGrid.getChildren().clear();
+            List<Movie> filtered = task.getValue();
+
+            if (filtered.isEmpty()) {
+                Label noResults = new Label("No movies found. Try adjusting your filters.");
+                noResults.setTextFill(Color.GRAY);
+                noResults.setFont(Font.font(20));
+                movieGrid.getChildren().add(noResults);
+            } else {
+                for (Movie movie : filtered) {
+                    movieGrid.getChildren().add(createMovieCard(movie));
+                }
+            }
+        });
+
+        task.setOnFailed(e -> task.getException().printStackTrace());
+        new Thread(task, "filter-thread").start();
+    }
+
+    /**
+     * FIX: Hero image loads in background via the shared thread pool.
+     * UI stays smooth; image swaps in with a fade once downloaded.
+     */
+    private void rotateHeroImageAsync() {
         if (recommendedMovies == null || recommendedMovies.isEmpty()) return;
 
-        Movie currentMovie = recommendedMovies.get(currentHeroImageIndex);
-
-        FadeTransition fadeOut = new FadeTransition(Duration.millis(400), heroImageView);
-        fadeOut.setFromValue(1.0);
-        fadeOut.setToValue(0.2);
-        fadeOut.setOnFinished(e -> {
-            heroImageView.setImage(new Image(currentMovie.getImageUrl(), 1200, 400, true, true));
-            heroTitle.setText(currentMovie.getTitle().toUpperCase());
-
-            FadeTransition fadeIn = new FadeTransition(Duration.millis(400), heroImageView);
-            fadeIn.setFromValue(0.2);
-            fadeIn.setToValue(1.0);
-            fadeIn.play();
-        });
-        fadeOut.play();
-
+        Movie movie = recommendedMovies.get(currentHeroImageIndex);
         currentHeroImageIndex = (currentHeroImageIndex + 1) % recommendedMovies.size();
+
+        String url = movie.getImageUrl();
+
+        // Kick off background image load
+        imageLoader.submit(() -> {
+            Image img = getCachedImage(url, 1200, 400);
+
+            Platform.runLater(() -> {
+                FadeTransition fadeOut = new FadeTransition(Duration.millis(400), heroImageView);
+                fadeOut.setFromValue(1.0);
+                fadeOut.setToValue(0.2);
+                fadeOut.setOnFinished(ev -> {
+                    heroImageView.setImage(img);
+                    heroTitle.setText(movie.getTitle().toUpperCase());
+
+                    FadeTransition fadeIn = new FadeTransition(Duration.millis(400), heroImageView);
+                    fadeIn.setFromValue(0.2);
+                    fadeIn.setToValue(1.0);
+                    fadeIn.play();
+                });
+                fadeOut.play();
+            });
+        });
     }
 
-    private void loadMovies(String keyword, String city) {
-        movieGrid.getChildren().clear();
-        this.currentSearchKeyword = keyword;
-        this.currentCityFilter = city;
-
-        List<Movie> filteredMovies = catalog.searchAndFilter(keyword, Genre.ALL, city, 0.0);
-
-        if (filteredMovies.isEmpty()) {
-            Label noResults = new Label("No movies found in " + city + ". Try searching something else!");
-            noResults.setTextFill(Color.GRAY);
-            noResults.setFont(Font.font(20));
-            movieGrid.getChildren().add(noResults);
-        } else {
-            for (Movie movie : filteredMovies) {
-                movieGrid.getChildren().add(createMovieCard(movie));
-            }
-        }
-    }
+    // =========================================================================
+    // MOVIE CARD
+    // =========================================================================
 
     private VBox createMovieCard(Movie movie) {
         VBox card = new VBox(10);
-        card.setStyle("-fx-background-color: " + COLOR_DARK_GRAY + "; -fx-background-radius: 15; -fx-border-color: #333333; -fx-border-radius: 15;");
+        card.setStyle("-fx-background-color: " + COLOR_DARK_GRAY +
+                "; -fx-background-radius: 15; -fx-border-color: #333333; -fx-border-radius: 15;");
         card.setPadding(new Insets(15));
         card.setPrefWidth(250);
         card.setAlignment(Pos.TOP_LEFT);
 
-        ImageView poster = new ImageView(new Image(movie.getImageUrl(), 220, 310, true, true));
-        poster.setStyle("-fx-background-radius: 10;");
+        // FIX: Start with a placeholder; load real poster in background
+        ImageView poster = new ImageView();
+        poster.setFitWidth(220);
+        poster.setFitHeight(310);
+        poster.setPreserveRatio(true);
+
+        Image placeholder = getCachedImage(PLACEHOLDER_URL, 220, 310);
+        poster.setImage(placeholder);
+
+        imageLoader.submit(() -> {
+            Image real = getCachedImage(movie.getImageUrl(), 220, 310);
+            Platform.runLater(() -> poster.setImage(real));
+        });
 
         Label title = new Label(movie.getTitle().toUpperCase());
         title.setTextFill(Color.WHITE);
@@ -282,6 +475,11 @@ public class MovieBookingApp extends Application {
 
         Label details = new Label("⭐ " + movie.getRating() + " | " + movie.getGenre());
         details.setTextFill(Color.web(COLOR_YELLOW));
+
+        // NEW: show year + language badges
+        Label meta = new Label(movie.getReleaseYear() + "  •  " + movie.getLanguage());
+        meta.setTextFill(Color.web("#AAAAAA"));
+        meta.setFont(Font.font(11));
 
         Label times = new Label("🕒 " + movie.getTimes());
         times.setTextFill(Color.LIGHTGRAY);
@@ -293,9 +491,8 @@ public class MovieBookingApp extends Application {
 
         Button bookBtn = new Button();
         bookBtn.setMaxWidth(Double.MAX_VALUE);
-        cardButtons.put(movie, bookBtn); // Track button for UI updates
-
-        updateButtonVisuals(movie); // Set initial state (Added vs Book Now)
+        cardButtons.put(movie, bookBtn);
+        updateButtonVisuals(movie);
 
         bookBtn.setOnAction(e -> {
             if (!basket.contains(movie)) {
@@ -304,11 +501,14 @@ public class MovieBookingApp extends Application {
             }
         });
 
-        card.getChildren().addAll(poster, title, details, times, priceLabel, bookBtn);
+        card.getChildren().addAll(poster, title, details, meta, times, priceLabel, bookBtn);
 
-        // Hover Effect
-        card.setOnMouseEntered(e -> card.setStyle("-fx-background-color: #252525; -fx-background-radius: 15; -fx-border-color: " + COLOR_YELLOW + "; -fx-border-radius: 15;"));
-        card.setOnMouseExited(e -> card.setStyle("-fx-background-color: " + COLOR_DARK_GRAY + "; -fx-background-radius: 15; -fx-border-color: #333333; -fx-border-radius: 15;"));
+        card.setOnMouseEntered(e -> card.setStyle(
+                "-fx-background-color: #252525; -fx-background-radius: 15;" +
+                        " -fx-border-color: " + COLOR_YELLOW + "; -fx-border-radius: 15;"));
+        card.setOnMouseExited(e -> card.setStyle(
+                "-fx-background-color: " + COLOR_DARK_GRAY +
+                        "; -fx-background-radius: 15; -fx-border-color: #333333; -fx-border-radius: 15;"));
 
         return card;
     }
@@ -319,18 +519,46 @@ public class MovieBookingApp extends Application {
 
         if (basket.contains(movie)) {
             btn.setText("ADDED ✓");
-            btn.setStyle("-fx-background-color: " + COLOR_SUCCESS_GREEN + "; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 12;");
+            btn.setStyle("-fx-background-color: " + COLOR_SUCCESS_GREEN +
+                    "; -fx-text-fill: white; -fx-font-weight: bold; -fx-padding: 12;");
             btn.setDisable(true);
         } else {
             btn.setText("BOOK NOW");
-            btn.setStyle("-fx-background-color: " + COLOR_YELLOW + "; -fx-text-fill: black; -fx-font-weight: bold; -fx-padding: 12; -fx-cursor: hand;");
+            btn.setStyle("-fx-background-color: " + COLOR_YELLOW +
+                    "; -fx-text-fill: black; -fx-font-weight: bold;" +
+                    " -fx-padding: 12; -fx-cursor: hand;");
             btn.setDisable(false);
         }
     }
 
-    // ==========================================
-    // CHECKOUT & DIALOG METHODS
-    // ==========================================
+    // =========================================================================
+    // IMAGE CACHE HELPER
+    // =========================================================================
+
+    /**
+     * Returns a cached Image, or downloads + caches it if not yet seen.
+     * Safe to call from any thread.
+     */
+    private Image getCachedImage(String url, double w, double h) {
+        return imageCache.computeIfAbsent(url, key -> new Image(key, w, h, true, true));
+    }
+
+    // =========================================================================
+    // FILTER HELPER
+    // =========================================================================
+
+    private Genre parseGenre(String label) {
+        if ("All Genres".equals(label)) return Genre.ALL;
+        try {
+            return Genre.valueOf(label.toUpperCase().replace("-", "_").replace(" ", "_"));
+        } catch (IllegalArgumentException e) {
+            return Genre.ALL;
+        }
+    }
+
+    // =========================================================================
+    // CHECKOUT & DIALOG METHODS  (unchanged from original)
+    // =========================================================================
 
     private void showBasket() {
         Dialog<Void> dialog = new Dialog<>();
@@ -347,7 +575,7 @@ public class MovieBookingApp extends Application {
         content.getChildren().add(header);
 
         final boolean[] proceedToCheckout = {false};
-        final double[] finalTotalToPay = {0.0};
+        final double[]  finalTotalToPay   = {0.0};
 
         if (basket.isEmpty()) {
             Label emptyLabel = new Label("Your basket is empty.");
@@ -356,10 +584,7 @@ public class MovieBookingApp extends Application {
             Button closeBtn = new Button("CLOSE");
             closeBtn.setMaxWidth(Double.MAX_VALUE);
             closeBtn.setStyle("-fx-background-color: " + COLOR_YELLOW + "; -fx-font-weight: bold;");
-            closeBtn.setOnAction(e -> {
-                dialog.setResult(null);
-                dialog.close();
-            });
+            closeBtn.setOnAction(e -> { dialog.setResult(null); dialog.close(); });
 
             content.getChildren().addAll(emptyLabel, closeBtn);
         } else {
@@ -370,27 +595,25 @@ public class MovieBookingApp extends Application {
                 itemRow.setAlignment(Pos.CENTER_LEFT);
 
                 Button removeBtn = new Button("✖");
-                removeBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: " + COLOR_ERROR_RED + "; -fx-font-size: 14px; -fx-cursor: hand;");
+                removeBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: " +
+                        COLOR_ERROR_RED + "; -fx-font-size: 14px; -fx-cursor: hand;");
                 removeBtn.setOnAction(e -> {
                     basket.remove(movie);
                     updateButtonVisuals(movie);
                     dialog.setResult(null);
                     dialog.close();
-                    Platform.runLater(this::showBasket); // Reload basket UI
+                    Platform.runLater(this::showBasket);
                 });
 
-                Label movieName = new Label("• " + movie.getTitle());
+                Label movieName  = new Label("• " + movie.getTitle());
                 movieName.setTextFill(Color.WHITE);
-
-                Region spacer = new Region();
+                Region spacer    = new Region();
                 HBox.setHgrow(spacer, Priority.ALWAYS);
-
                 Label priceLabel = new Label("$" + String.format("%.2f", movie.getPrice()));
                 priceLabel.setTextFill(Color.LIGHTGRAY);
 
                 itemRow.getChildren().addAll(removeBtn, movieName, spacer, priceLabel);
                 content.getChildren().add(itemRow);
-
                 tempTotal += movie.getPrice();
             }
 
@@ -400,64 +623,49 @@ public class MovieBookingApp extends Application {
             Separator separator = new Separator();
             separator.setStyle("-fx-background-color: #333333;");
 
-            // Coupon Section
             HBox couponBox = new HBox(10);
             couponBox.setAlignment(Pos.CENTER_LEFT);
 
             TextField couponField = new TextField();
             couponField.setPromptText("Enter code (e.g., CINEMA20)");
-            couponField.setStyle("-fx-background-color: #252525; -fx-text-fill: white; -fx-border-color: #333333; -fx-border-radius: 3;");
+            couponField.setStyle("-fx-background-color: #252525; -fx-text-fill: white;" +
+                    " -fx-border-color: #333333; -fx-border-radius: 3;");
 
-            Button applyBtn = new Button("APPLY");
+            Button    applyBtn    = new Button("APPLY");
             applyBtn.setStyle("-fx-background-color: #333333; -fx-text-fill: white; -fx-font-weight: bold;");
-
-            Label discountMsg = new Label();
+            Label     discountMsg = new Label();
             discountMsg.setFont(Font.font(12));
             couponBox.getChildren().addAll(couponField, applyBtn, discountMsg);
 
-            // Totals Section
-            VBox totalBox = new VBox(5);
+            VBox  totalBox          = new VBox(5);
             totalBox.setAlignment(Pos.CENTER_RIGHT);
             Label originalTotalLabel = new Label("Initial Price: $" + String.format("%.2f", initialTotal));
             originalTotalLabel.setTextFill(Color.LIGHTGRAY);
             originalTotalLabel.setFont(Font.font("Verdana", 14));
-
-            Label finalTotalLabel = new Label("TOTAL: $" + String.format("%.2f", initialTotal));
+            Label finalTotalLabel    = new Label("TOTAL: $" + String.format("%.2f", initialTotal));
             finalTotalLabel.setTextFill(Color.web(COLOR_YELLOW));
             finalTotalLabel.setFont(Font.font("Verdana", FontWeight.BOLD, 20));
-
             totalBox.getChildren().addAll(originalTotalLabel, finalTotalLabel);
 
             applyBtn.setOnAction(e -> {
-                String enteredCode = couponField.getText().trim();
-
-                if (enteredCode.isEmpty()) {
+                String code = couponField.getText().trim();
+                if (code.isEmpty()) {
                     discountMsg.setText("Please enter a code.");
                     discountMsg.setTextFill(Color.web(COLOR_ERROR_RED));
                     return;
                 }
-
-                // 1. Call our database service to get the real discount
-                double discountPercent = CouponService.getDiscountPercentage(enteredCode);
-
+                double discountPercent = CouponService.getDiscountPercentage(code);
                 if (discountPercent > 0) {
-                    // 2. Calculate the discount based on the percentage from the DB
                     double discountAmount = initialTotal * (discountPercent / 100.0);
                     finalTotalToPay[0] = initialTotal - discountAmount;
-
-                    // 3. Update the UI to show the successful discount
                     originalTotalLabel.setStyle("-fx-strikethrough: true; -fx-text-fill: gray;");
                     finalTotalLabel.setText("SALE TOTAL: $" + String.format("%.2f", finalTotalToPay[0]));
                     finalTotalLabel.setTextFill(Color.web(COLOR_SUCCESS_GREEN));
-
                     discountMsg.setText("-" + discountPercent + "% Applied!");
                     discountMsg.setTextFill(Color.web(COLOR_SUCCESS_GREEN));
-
-                    // Lock the button so they can't apply multiple coupons
                     applyBtn.setDisable(true);
                     couponField.setDisable(true);
                 } else {
-                    // 4. If the DB returns 0.0, it's invalid or inactive
                     discountMsg.setText("Invalid or Expired Code");
                     discountMsg.setTextFill(Color.web(COLOR_ERROR_RED));
                 }
@@ -465,20 +673,18 @@ public class MovieBookingApp extends Application {
 
             content.getChildren().addAll(separator, couponBox, totalBox);
 
-            // Action Buttons
             HBox buttonBox = new HBox(15);
             buttonBox.setAlignment(Pos.CENTER_RIGHT);
             buttonBox.setPadding(new Insets(10, 0, 0, 0));
 
             Button cancelBtn = new Button("CANCEL");
-            cancelBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: " + COLOR_YELLOW + "; -fx-border-color: " + COLOR_YELLOW + "; -fx-border-radius: 5;");
-            cancelBtn.setOnAction(e -> {
-                dialog.setResult(null);
-                dialog.close();
-            });
+            cancelBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: " +
+                    COLOR_YELLOW + "; -fx-border-color: " + COLOR_YELLOW + "; -fx-border-radius: 5;");
+            cancelBtn.setOnAction(e -> { dialog.setResult(null); dialog.close(); });
 
             Button checkoutBtn = new Button("PROCEED TO CHECKOUT");
-            checkoutBtn.setStyle("-fx-background-color: " + COLOR_YELLOW + "; -fx-font-weight: bold; -fx-text-fill: black; -fx-background-radius: 5;");
+            checkoutBtn.setStyle("-fx-background-color: " + COLOR_YELLOW +
+                    "; -fx-font-weight: bold; -fx-text-fill: black; -fx-background-radius: 5;");
             checkoutBtn.setOnAction(e -> {
                 proceedToCheckout[0] = true;
                 dialog.setResult(null);
@@ -493,12 +699,9 @@ public class MovieBookingApp extends Application {
         dialog.getDialogPane().setStyle("-fx-background-color: " + COLOR_DARK_GRAY + ";");
         dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
         dialog.getDialogPane().lookupButton(ButtonType.CLOSE).setVisible(false);
-
         dialog.showAndWait();
 
-        if (proceedToCheckout[0]) {
-            showPaymentOptions(finalTotalToPay[0]);
-        }
+        if (proceedToCheckout[0]) showPaymentOptions(finalTotalToPay[0]);
     }
 
     private void showPaymentOptions(double amountToPay) {
@@ -507,7 +710,8 @@ public class MovieBookingApp extends Application {
 
         VBox content = new VBox(20);
         content.setPadding(new Insets(35));
-        content.setStyle("-fx-background-color: " + COLOR_DARK_GRAY + "; -fx-border-color: " + COLOR_YELLOW + "; -fx-border-width: 2;");
+        content.setStyle("-fx-background-color: " + COLOR_DARK_GRAY +
+                "; -fx-border-color: " + COLOR_YELLOW + "; -fx-border-width: 2;");
         content.setAlignment(Pos.CENTER);
 
         Label header = new Label("SELECT PAYMENT METHOD");
@@ -532,10 +736,7 @@ public class MovieBookingApp extends Application {
 
         Button cancelBtn = new Button("← Back to Basket");
         cancelBtn.setStyle("-fx-background-color: transparent; -fx-text-fill: #888888; -fx-cursor: hand;");
-        cancelBtn.setOnAction(e -> {
-            payDialog.close();
-            Platform.runLater(this::showBasket);
-        });
+        cancelBtn.setOnAction(e -> { payDialog.close(); Platform.runLater(this::showBasket); });
 
         content.getChildren().addAll(header, amountLabel, cardBtn, cashBtn, cancelBtn);
         payDialog.getDialogPane().setContent(content);
@@ -550,7 +751,8 @@ public class MovieBookingApp extends Application {
 
         VBox content = new VBox(20);
         content.setPadding(new Insets(35));
-        content.setStyle("-fx-background-color: " + COLOR_DARK_GRAY + "; -fx-border-color: " + COLOR_YELLOW + "; -fx-border-width: 2;");
+        content.setStyle("-fx-background-color: " + COLOR_DARK_GRAY +
+                "; -fx-border-color: " + COLOR_YELLOW + "; -fx-border-width: 2;");
         content.setAlignment(Pos.CENTER);
 
         Label header = new Label("HOW SHOULD WE SEND YOUR RECEIPT?");
@@ -576,29 +778,32 @@ public class MovieBookingApp extends Application {
         notifDialog.showAndWait();
     }
 
-    // Helper for creating uniform checkout buttons
     private Button createCheckoutButton(String text) {
         Button btn = new Button(text);
         btn.setPrefWidth(280);
         btn.setPrefHeight(50);
-        btn.setStyle("-fx-background-color: #2A2A2A; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: #555555; -fx-border-radius: 5; -fx-cursor: hand;");
-        btn.setOnMouseEntered(e -> btn.setStyle("-fx-background-color: #3A3A3A; -fx-text-fill: " + COLOR_YELLOW + "; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: " + COLOR_YELLOW + "; -fx-border-radius: 5; -fx-cursor: hand;"));
-        btn.setOnMouseExited(e -> btn.setStyle("-fx-background-color: #2A2A2A; -fx-text-fill: white; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: #555555; -fx-border-radius: 5; -fx-cursor: hand;"));
+        btn.setStyle("-fx-background-color: #2A2A2A; -fx-text-fill: white; -fx-font-size: 14px;" +
+                " -fx-font-weight: bold; -fx-border-color: #555555; -fx-border-radius: 5; -fx-cursor: hand;");
+        btn.setOnMouseEntered(e -> btn.setStyle("-fx-background-color: #3A3A3A; -fx-text-fill: " +
+                COLOR_YELLOW + "; -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: " +
+                COLOR_YELLOW + "; -fx-border-radius: 5; -fx-cursor: hand;"));
+        btn.setOnMouseExited(e -> btn.setStyle("-fx-background-color: #2A2A2A; -fx-text-fill: white;" +
+                " -fx-font-size: 14px; -fx-font-weight: bold; -fx-border-color: #555555;" +
+                " -fx-border-radius: 5; -fx-cursor: hand;"));
         return btn;
     }
 
-    // ==========================================
+    // =========================================================================
     // DATABASE INTEGRATION
-    // ==========================================
+    // =========================================================================
 
     private void processDatabaseCheckout(String paymentMethod, double amountToPay, String notificationPref) {
-        // Generates a guaranteed unique 8-character alphanumeric ID
         String bookingId = "BKG-" + java.util.UUID.randomUUID().toString().substring(0, 8).toUpperCase();
 
         try (Connection conn = DatabaseManager.getConnection()) {
-
-            // 1. Save Main Booking Details
-            String insertBookingQuery = "INSERT INTO bookings (booking_id, payment_method, total_paid, notification_pref) VALUES (?, ?, ?, ?)";
+            String insertBookingQuery =
+                    "INSERT INTO bookings (booking_id, payment_method, total_paid, notification_pref)" +
+                            " VALUES (?, ?, ?, ?)";
             try (PreparedStatement bookingStmt = conn.prepareStatement(insertBookingQuery)) {
                 bookingStmt.setString(1, bookingId);
                 bookingStmt.setString(2, paymentMethod);
@@ -607,8 +812,8 @@ public class MovieBookingApp extends Application {
                 bookingStmt.executeUpdate();
             }
 
-            // 2. Save Associated Tickets
-            String insertTicketQuery = "INSERT INTO booked_tickets (booking_id, movie_title, price) VALUES (?, ?, ?)";
+            String insertTicketQuery =
+                    "INSERT INTO booked_tickets (booking_id, movie_title, price) VALUES (?, ?, ?)";
             try (PreparedStatement ticketStmt = conn.prepareStatement(insertTicketQuery)) {
                 for (Movie movie : basket) {
                     ticketStmt.setString(1, bookingId);
@@ -618,20 +823,20 @@ public class MovieBookingApp extends Application {
                 }
             }
 
-            // 3. Dispatch Notification to Profile
-            String notificationDesc = String.format("Booking %s confirmed! Paid $%.2f via %s. Receipt sent via %s.",
+            String notificationDesc = String.format(
+                    "Booking %s confirmed! Paid $%.2f via %s. Receipt sent via %s.",
                     bookingId, amountToPay, paymentMethod, notificationPref);
             UserProfile.addNotification("New Booking", notificationDesc);
 
-            // 4. Reset Application State
             basket.clear();
-            loadMovies(currentSearchKeyword, currentCityFilter); // Refreshes UI buttons
+            loadMoviesAsync(currentSearchKeyword, currentCityFilter,
+                    currentGenreFilter, currentYearFilter, currentLanguageFilter);
 
-            // 5. Show Success Popup
             Alert successAlert = new Alert(Alert.AlertType.INFORMATION);
             successAlert.setTitle("Payment Successful");
             successAlert.setHeaderText("Checkout Complete!");
-            successAlert.setContentText("Your Booking ID is: " + bookingId + "\nAll tickets have been saved to the database.");
+            successAlert.setContentText("Your Booking ID is: " + bookingId +
+                    "\nAll tickets have been saved to the database.");
             successAlert.showAndWait();
 
         } catch (SQLException e) {
